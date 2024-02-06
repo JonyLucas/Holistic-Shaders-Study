@@ -7,6 +7,9 @@ Shader "Holistic/Advanced/Waves"
         _Frequency ("Frequency", Range(0.1, 10)) = 1
         _Amplitude ("Amplitude", Range(0.1, 10)) = 1
         _Speed ("Speed", Range(0.1, 100)) = 10
+        _ScrollSpeed ("Scrool Speed", Range(0.1, 10)) = 1
+        _ScrollX ("Scrool X", Range(0.1, 1)) = 1
+        _ScrollY ("Scrool Y", Range(0.1, 1)) = 1
     }
     SubShader
     {
@@ -23,6 +26,9 @@ Shader "Holistic/Advanced/Waves"
         float _Frequency;
         float _Amplitude;
         float _Speed;
+        float _ScrollSpeed;
+        float _ScrollX;
+        float _ScrollY;
         sampler2D _MainTex;
 
         struct appdata
@@ -46,7 +52,8 @@ Shader "Holistic/Advanced/Waves"
 
         void surf(Input IN, inout SurfaceOutput o)
         {
-            float4 c = tex2D(_MainTex, IN.uv_MainTex) * _TintColor;
+            float2 uv = IN.uv_MainTex + float2(_ScrollX,_ScrollY) * _Time.y * _ScrollSpeed;
+            float4 c = tex2D(_MainTex, uv) * _TintColor;
             o.Albedo = c.rgb * IN.vertColor.rgb;
         }
         ENDCG
