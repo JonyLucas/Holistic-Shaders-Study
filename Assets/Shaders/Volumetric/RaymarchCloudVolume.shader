@@ -1,14 +1,17 @@
-Shader "Holistic/Volumetric/RaymarchCloudVolume"
+Shader "Holistic/RaymarchCloudsVolume"
 {
     Properties
     {
-        _Scale ("Scale", Range(0.1, 10.0)) = 2
-        _StepScale ("Step Scale", Range(0.1, 100.0)) = 1
-        _Steps ("Steps", Range(1, 100)) = 50
-        _MinHeight ("Min Height", Range(0.0, 5.0)) = 0.0
-        _MaxHeight ("Max Height", Range(5.0, 10.0)) = 10
-        _FadeDistance ("Fade Distance", Range(0.0, 10.0)) = 1
-        _SunDirection ("Sun Direction", Vector) = (1, 0, 0, 0)
+        _BaseColor ("Base Color", Color) = (1,1,1,1)
+        _Scale ("Scale", Range (0.1, 10.0)) = 2.0
+        _StepScale ("Step Scale", Range (0.1, 100.0)) = 1
+        _Steps ("Steps", Range(1,200)) = 60
+        _MinHeight ("Min Height", Range (0.0, 5.0)) = 0
+        _MaxHeight ("Max Height", Range (6.0, 10.0)) = 10
+        _FadeDist ("Fade Distance", Range (0.0, 10.0)) = 0.5
+        _SunDir ("Sun Direction", Vector) = (1,0,0,0)
+        _MoveDirection ("Move Direction", Vector) = (0,0,0,0)
+        _Speed ("Speed", Range (0.1, 10.0)) = 1
     }
     SubShader
     {
@@ -16,7 +19,6 @@ Shader "Holistic/Volumetric/RaymarchCloudVolume"
         {
             "Queue"="Transparent"
         }
-
         Blend SrcAlpha OneMinusSrcAlpha
         Cull Off
         Lighting Off
@@ -42,29 +44,33 @@ Shader "Holistic/Volumetric/RaymarchCloudVolume"
                 float4 pos : SV_POSITION;
                 float3 view : TEXCOORD0;
                 float4 projPos : TEXCOORD1;
-                float wPos : TEXCOORD2;
+                float3 wpos : TEXCOORD2;
             };
 
+            fixed4 _BaseColor;
+            float _MinHeight;
+            float _MaxHeight;
+            float _FadeDist;
             float _Scale;
             float _StepScale;
             float _Steps;
-            float _MinHeight;
-            float _MaxHeight;
-            float _FadeDistance;
-            float3 _SunDirection;
+            float4 _SunDir;
+            float3 _MoveDirection;
+            float _Speed;
 
-            float random(float3 value, float3 seed)
+            float random(float3 value, float3 dotDir)
             {
-                return frac(sin(dot(value, seed)) * 43758.5453);
+                float3 smallV = sin(value);
+                float random = dot(smallV, dotDir);
+                random = frac(sin(random) * 123574.43212);
+                return random;
             }
 
-            float3 random3d(float3 value, float3 seed)
+            float3 random3d(float3 value)
             {
-                float3 result = float3(0, 0, 0);
-                result.x = random(value, seed);
-                result.y = random(value, result);
-                result.z = random(value, result);
-                return result;
+                return float3(random(value, float3(12.898, 68.54, 37.7298)),
+                              random(value, float3(39.898, 26.54, 85.7238)),
+                              random(value, float3(76.898, 12.54, 8.6788)));
             }
 
             float noise3d(float3 value)
@@ -73,77 +79,131 @@ Shader "Holistic/Volumetric/RaymarchCloudVolume"
                 float3 interp = frac(value);
                 interp = smoothstep(0.0, 1.0, interp);
 
-                float3 zValues[2];
-                for (int z = 0; z < 2; z++)
+                float3 ZValues[2];
+                for (int z = 0; z <= 1; z++)
                 {
-                    float3 yValues[2];
-                    for (int y = 0; y < 2; y++)
+                    float3 YValues[2];
+                    for (int y = 0; y <= 1; y++)
                     {
-                        float3 xValues[2];
-                        for (int x = 0; x < 2; x++)
+                        float3 XValues[2];
+                        for (int x = 0; x <= 1; x++)
                         {
-                            xValues[x] = random3d(value, float3(x, y, z));
+                            float3 cell = floor(value) + float3(x, y, z);
+                            XValues[x] = random3d(cell);
                         }
-                        yValues[y] = lerp(xValues[0], xValues[1], interp.x);
+                        YValues[y] = lerp(XValues[0], XValues[1], interp.x);
                     }
-                    zValues[z] = lerp(yValues[0], yValues[1], interp.y);
+                    ZValues[z] = lerp(YValues[0], YValues[1], interp.y);
                 }
 
-                float noise = -1.0 + 2.0 * lerp(zValues[0], zValues[1], interp.z);
+                float noise = -1.0 + 2.0 * lerp(ZValues[0], ZValues[1], interp.z);
                 return noise;
             }
 
-            #define MARCH(steps, noiseMap, rayDir, cameraPos, depth, color, sum, t) {\
-                for(int i = 0; i < steps; i++) \
+            fixed4 integrate(fixed4 sum, float diffuse, float density, fixed4 bgcol, float t)
+            {
+                fixed3 lighting = _BaseColor * 1.3 + 0.5 * fixed3(0.7, 0.5, 0.3) * diffuse;
+                fixed3 colrgb = lerp(fixed3(1.0, 0.95, 0.8), fixed3(0.65, 0.65, 0.65), density);
+                fixed4 col = fixed4(colrgb.r, colrgb.g, colrgb.b, density);
+                col.rgb *= lighting;
+                col.rgb = lerp(col.rgb, bgcol, 1.0 - exp(-0.003 * t * t));
+                col.a *= 0.5;
+                col.rgb *= col.a;
+                return sum + col * (1.0 - sum.a);
+            }
+
+            #define MARCH(steps, noiseMap, cameraPos, viewDir, bgcol, sum, depth, t) { \
+                for (int i = 0; i < steps  + 1; i++) \
                 { \
                     if(t > depth) \
-                    { \
                         break; \
-                    } \
-                    float3 p = cameraPos + t * rayDir; \
-                    if(p.y > _MaxHeight || p.y < _MinHeight || sum.a > 0.99) \
-                    { \
-                        t += max(0.1, 0.02 * t); \
+                    float3 pos = cameraPos + t * viewDir; \
+                    if (pos.y < _MinHeight || pos.y > _MaxHeight || sum.a > 0.99) \
+                    {\
+                        t += max(0.1, 0.02*t); \
                         continue; \
-                    } \
-                    float density = noiseMap(p); \
-                    if(density > 0.01) \
+                    }\
+                    \
+                    float density = noiseMap(pos); \
+                    if (density > 0.01) \
                     { \
-                        float diffuse = clamp((density - noiseMap(p + _SunDirection * 0.3)) / 0.6, 0, 1); \
-                        sum = diffuse; \
+                        float diffuse = clamp((density - noiseMap(pos + 0.3 * _SunDir)) / 0.6, 0.0, 1.0);\
+                        sum = integrate(sum, diffuse, density, bgcol, t); \
                     } \
                     t += max(0.1, 0.02 * t); \
                 } \
             }
 
 
-            fixed4 raymarch(float3 cameraPos, float3 rayDir, fixed4 color, float depth)
+            #define NOISEPROC(N, P) 1.75 * N * saturate((_MaxHeight - P.y)/_FadeDist)
+
+            float map1(float3 q)
+            {
+                float3 p = q;
+                float f;
+                f = 0.5 * noise3d(q);
+                q *= 2.0;
+                f += 0.25 * noise3d(q);
+                q *= 3.5;
+                f += 0.125 * noise3d(q);
+                return NOISEPROC(f, p);
+            }
+
+            float map2(float3 q)
+            {
+                float3 p = q;
+                float f;
+                f = 0.8 * noise3d(q);
+                q *= 1.5;
+                f += 0.4 * noise3d(q);
+                q *= 3.5;
+                f += 0.2 * noise3d(q);
+                return NOISEPROC(f, p);
+            }
+
+            float map3(float3 q)
+            {
+                float3 p = q;
+                float f;
+                f = 1.2 * noise3d(q);
+                q *= 2;
+                f += 0.65 * noise3d(q);
+                q *= 4;
+                f += 0.15 * noise3d(q);
+                return NOISEPROC(f, p);
+            }
+
+            fixed4 raymarch(float3 cameraPos, float3 viewDir, fixed4 bgcol, float depth)
             {
                 fixed4 col = fixed4(0, 0, 0, 0);
                 float ct = 0;
-                MARCH(_Steps, noise3d, rayDir, cameraPos, depth, color, col, ct);
-                return clamp(col, 0, 1);
+
+                MARCH(_Steps, map1, cameraPos, viewDir, bgcol, col, depth, ct);
+                MARCH(_Steps, map2, cameraPos, viewDir, bgcol, col, depth * 2, ct);
+                MARCH(_Steps, map3, cameraPos, viewDir, bgcol, col, depth * 1.5, ct);
+
+                return clamp(col, 0.0, 1.0);
             }
 
             v2f vert(appdata v)
             {
                 v2f o;
+                o.wpos = mul(unity_ObjectToWorld, v.vertex).xyz;
                 o.pos = UnityObjectToClipPos(v.vertex);
-                o.wPos = mul(unity_ObjectToWorld, v.vertex).xyz;
-                o.view = normalize(UnityWorldSpaceViewDir(o.wPos));
+                o.view = o.wpos - _WorldSpaceCameraPos;
                 o.projPos = ComputeScreenPos(o.pos);
                 return o;
             }
-
 
             fixed4 frag(v2f i) : SV_Target
             {
                 float depth = 1;
                 depth *= length(i.view);
-                fixed4 color = fixed4(0, 0, 0, 0);
-                fixed4 clouds = raymarch(_WorldSpaceCameraPos, normalize(i.view) * _Scale, color, depth);
-                fixed3 mixedColors = color * (1 - clouds.a) + clouds.rgb;
-                return fixed4(mixedColors, clouds.a);
+                fixed4 col = fixed4(1, 1, 1, 0);
+                float3 movePos = _WorldSpaceCameraPos + _MoveDirection * _Speed * _Time.y; 
+                fixed4 clouds = raymarch(movePos, normalize(i.view) * _StepScale, col, depth);
+                fixed3 mixedCol = col * (1.0 - clouds.a) + clouds.rgb;
+                return fixed4(mixedCol, clouds.a);
             }
             ENDCG
         }
